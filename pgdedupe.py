@@ -16,15 +16,12 @@ SQL, but it's not very pretty.
 """
 
 import argparse
-from itertools import islice
 import logging
 import os
 
 import dedupe
 import psycopg2
 from psycopg2.extras import RealDictCursor
-
-from IPython import embed
 
 
 KEY_FIELD = 'activity_nr'
@@ -84,8 +81,6 @@ def main(args):
     deduper = dedupe.Dedupe(FIELDS, num_cores=args.cores)
 
     with psycopg2.connect(database=args.dbname,
-                          user='ubuntu',
-                          password='ubuntu',
                           host='localhost',
                           cursor_factory=RealDictCursor) as con:
         with con.cursor() as c:
@@ -153,7 +148,6 @@ def main(args):
             b_data = deduper.blocker(full_data)
 
             logger.debug('Inserting blocks into blocking_map')
-            value_template = ','.join(['%s', '%s'])
             for block in b_data:
                 c.execute("""
                     INSERT INTO blocking_map (block_key, activity_nr)
