@@ -16,24 +16,26 @@ SQL, but it's not very pretty.
 """
 
 import argparse
-import csv
+from itertools import islice
 import logging
 import os
-import tempfile
-import time
 
 import dedupe
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
+from IPython import embed
 
-START_TIME = time.time()
+
 KEY_FIELD = 'activity_nr'
 SOURCE_TABLE = 'records'
+BULK_INSERT_SIZE = 100
+
 FIELDS = [
     {'field': 'estab_name', 'type': 'String'},
     {'field': 'site_address', 'type': 'String'},
     {'field': 'site_city', 'type': 'ShortString', 'Has Missing': True},
+    {'field': 'site_state', 'type': 'ShortString', 'Has Missing': True},
     {'field': 'site_zip', 'type': 'ShortString', 'Has Missing': True},
     {'field': 'owner_type', 'type': 'Categorical',
      'categories': ['A', 'B', 'C', 'D', '\"\"']},
@@ -45,7 +47,7 @@ FIELDS = [
     {'field': 'open_date', 'type': 'ShortString', 'Has Missing': True}
     ]
 
-logger = logging.getLogger()
+logger = logging.getLogger(__file__)
 
 
 def candidates_gen(result_set):
@@ -63,8 +65,7 @@ def candidates_gen(result_set):
             i += 1
 
             if i % 10000 == 0:
-                logging.debug(i, 'blocks')
-                logging.debug(time.time() - START_TIME, 'seconds')
+                logging.debug('%s blocks' % i)
 
         smaller_ids = row['smaller_ids']
         if smaller_ids:
@@ -78,25 +79,29 @@ def candidates_gen(result_set):
         yield records
 
 
+# @profile
 def main(args):
     deduper = dedupe.Dedupe(FIELDS, num_cores=args.cores)
 
     with psycopg2.connect(database=args.dbname,
+                          user='ubuntu',
+                          password='ubuntu',
+                          host='localhost',
                           cursor_factory=RealDictCursor) as con:
-        c = con.cursor()
-        with con.cursor('deduper') as c_deduper:
+        with con.cursor() as c:
             # Generate a sample size
             c.execute('SELECT COUNT(*) AS count FROM %s' % SOURCE_TABLE)
             row = c.fetchone()
             count = row['count']
             sample_size = int(count * args.sample)
-            logger.debug('Generating sample of %s records' % sample_size)
 
             # Create the sample (warning: very memory intensive)
-            c_deduper.execute('SELECT * FROM %s' % SOURCE_TABLE)
-            temp_d = dict((i, row) for i, row in enumerate(c_deduper))
-            deduper.sample(temp_d, sample_size)
-            del(temp_d)
+            logger.debug('Generating sample of %s records' % sample_size)
+            with con.cursor('deduper') as c_deduper:
+                c_deduper.execute('SELECT * FROM %s' % SOURCE_TABLE)
+                temp_d = dict((i, row) for i, row in enumerate(c_deduper))
+                deduper.sample(temp_d, sample_size)
+                del(temp_d)
 
             # Load training data (no problem if it doesn't exist yet)
             if os.path.exists(args.training):
@@ -118,7 +123,7 @@ def main(args):
             deduper.cleanupTraining()
 
             # Blocking
-            logger.debug('Creating blocking table')
+            logger.debug('Creating blocking_map table')
             c.execute("""
                 DROP TABLE IF EXISTS blocking_map
                 """)
@@ -130,35 +135,31 @@ def main(args):
             # Generate inverted index for each field
             for field in deduper.blocker.index_fields:
                 logger.debug('Selecting distinct values for "%s"' % field)
-                c2 = con.cursor('c2')
-                c2.execute("""
+                c_index = con.cursor('index')
+                c_index.execute("""
                     SELECT DISTINCT %s FROM %s
                     """ % (field, SOURCE_TABLE))
-                field_data = (row[field] for row in c2)
+                field_data = (row[field] for row in c_index)
                 deduper.blocker.index(field_data, field)
-                c2.close()
+                c_index.close()
 
             # Generating blocking map
             logger.debug('Generating blocking map')
-            c.execute("""
+            c_block = con.cursor('block')
+            c_block.execute("""
                 SELECT * FROM %s
                 """ % SOURCE_TABLE)
-            full_data = ((row[KEY_FIELD], row) for row in c)
+            full_data = ((row[KEY_FIELD], row) for row in c_block)
             b_data = deduper.blocker(full_data)
 
-            # NOTE: Really? write to CSV, then load in?
-            logger.debug('Writing blocks to temp CSV file')
-            csv_file = tempfile.NamedTemporaryFile(mode='w+t',
-                                                   prefix='blocks_',
-                                                   delete=False)
-            csv_writer = csv.writer(csv_file)
-            csv_writer.writerows(b_data)
-            csv_file.close()
+            logger.debug('Inserting blocks into blocking_map')
+            value_template = ','.join(['%s', '%s'])
+            for block in b_data:
+                c.execute("""
+                    INSERT INTO blocking_map (block_key, activity_nr)
+                    VALUES {0}
+                    """.format(block))
 
-            logger.debug('Copying block CSV data into blocking_map table')
-            with open(csv_file.name, 'r') as fp:
-                c.copy_expert("COPY blocking_map FROM STDIN CSV", fp)
-            os.remove(csv_file.name)
             con.commit()
 
             logger.debug('Indexing blocks')
@@ -221,7 +222,6 @@ def main(args):
                     ON covered_blocks (%s)
                 """ % (KEY_FIELD, KEY_FIELD))
             logging.debug('Committing')
-            con.commit()
 
             logging.debug('Creating smaller_coverage')
             c.execute("""
@@ -237,18 +237,18 @@ def main(args):
             con.commit()
 
             logging.debug('Clustering...')
-            c4 = con.cursor('c4')
-            c4.execute("""
+            c_cluster = con.cursor('cluster')
+            c_cluster.execute("""
                 SELECT *
                 FROM smaller_coverage
                 INNER JOIN %s
                     USING (%s)
                 ORDER BY (block_id)
                 """ % (SOURCE_TABLE, KEY_FIELD))
-            clustered_dupes = deduper.matchBlocks(candidates_gen(c4),
-                                                  threshold=0.5)
+            clustered_dupes = deduper.matchBlocks(
+                    candidates_gen(c_cluster), threshold=0.5)
 
-            logging.debug('Creating entity_map database')
+            logging.debug('Creating entity_map table')
             c.execute("DROP TABLE IF EXISTS entity_map")
             c.execute("""
                 CREATE TABLE entity_map (
@@ -258,27 +258,20 @@ def main(args):
                     PRIMARY KEY(%s)
                 )""" % (KEY_FIELD, KEY_FIELD))
 
-            csv_file = tempfile.NamedTemporaryFile(mode='w+t',
-                                                   prefix='entity_map_',
-                                                   delete=False)
-            csv_writer = csv.writer(csv_file)
-
+            logger.debug('Inserting entities into entity_map')
             for cluster, scores in clustered_dupes:
                 cluster_id = cluster[0]
                 for key_field, score in zip(cluster, scores):
-                    csv_writer.writerow([key_field, cluster_id, score])
-
-            c4.close()
-            csv_file.close()
-
-            fp = open(csv_file.name, 'r')
-            c.copy_expert("COPY entity_map FROM STDIN CSV", fp)
-            fp.close()
-            os.remove(csv_file.name)
-            con.commit()
+                    c.execute("""
+                        INSERT INTO entity_map
+                            (%s, canon_id, cluster_score)
+                        VALUES (%s, %s, %s)
+                        """ % (KEY_FIELD, key_field, cluster_id, score))
 
             logging.debug('Indexing head_index')
+            c_cluster.close()
             c.execute("CREATE INDEX head_index ON entity_map (canon_id)")
+            con.commit()
 
 
 if __name__ == '__main__':
