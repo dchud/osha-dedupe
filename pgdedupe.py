@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-""" 
+"""
 pgdedupe.py - dedupe a file of OSHA inspection records using the
 dedupe library.  Based heavily on example in dedupe-examples repo
 available from:
@@ -29,7 +29,7 @@ from psycopg2.extras import RealDictCursor
 
 START_TIME = time.time()
 KEY_FIELD = 'activity_nr'
-SOURCE_TABLE = 'sample'
+SOURCE_TABLE = 'records'
 FIELDS = [
     {'field': 'estab_name', 'type': 'String'},
     {'field': 'site_address', 'type': 'String'},
@@ -37,8 +37,7 @@ FIELDS = [
     {'field': 'site_zip', 'type': 'ShortString', 'Has Missing': True},
     {'field': 'owner_type', 'type': 'Categorical',
      'categories': ['A', 'B', 'C', 'D', '\"\"']},
-    {'field': 'sic_code', 'type': 'ShortString',
-     'Has Missing': True},
+    {'field': 'sic_code', 'type': 'ShortString', 'Has Missing': True},
     {'field': 'naics_code', 'type': 'ShortString', 'Has Missing': True},
     {'field': 'union_status', 'type': 'Categorical', 'Has Missing': True,
      'categories': ['Y', 'U', 'A', 'N', 'B', '\"\"']},
@@ -87,14 +86,14 @@ def main(args):
         c = con.cursor()
         with con.cursor('deduper') as c_deduper:
             # Generate a sample size
-            c.execute('SELECT COUNT(*) AS count FROM sample')
+            c.execute('SELECT COUNT(*) AS count FROM %s' % SOURCE_TABLE)
             row = c.fetchone()
             count = row['count']
             sample_size = int(count * args.sample)
             logger.debug('Generating sample of %s records' % sample_size)
 
             # Create the sample (warning: very memory intensive)
-            c_deduper.execute('SELECT * FROM sample')
+            c_deduper.execute('SELECT * FROM %s' % SOURCE_TABLE)
             temp_d = dict((i, row) for i, row in enumerate(c_deduper))
             deduper.sample(temp_d, sample_size)
             del(temp_d)
@@ -133,8 +132,8 @@ def main(args):
                 logger.debug('Selecting distinct values for "%s"' % field)
                 c2 = con.cursor('c2')
                 c2.execute("""
-                    SELECT DISTINCT %s FROM sample
-                    """ % field)
+                    SELECT DISTINCT %s FROM %s
+                    """ % (field, SOURCE_TABLE))
                 field_data = (row[field] for row in c2)
                 deduper.blocker.index(field_data, field)
                 c2.close()
@@ -142,8 +141,8 @@ def main(args):
             # Generating blocking map
             logger.debug('Generating blocking map')
             c.execute("""
-                SELECT * FROM sample
-                """)
+                SELECT * FROM %s
+                """ % SOURCE_TABLE)
             full_data = ((row[KEY_FIELD], row) for row in c)
             b_data = deduper.blocker(full_data)
 
