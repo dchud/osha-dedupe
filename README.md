@@ -111,7 +111,13 @@ Edit to add "user='ubuntu', password='ubuntu'" to db connect at line 83.
 
 ### Get it started; time it, too
 
-Note: ```--cores 30``` on a big EC2 instance type, change appropriately.
+Notes: 
+
+ * ```-v```: verbose debugging output
+ * ```-s 0.10```: take a 10% sample from the provided data
+ * ```--dbname oshadedupe```: use the ```oshadedupe``` db set up earlier
+ * ```-t training.json```: create/use/save this file for training data
+ * ```--cores 30``` on a big EC2 instance type, change appropriately
 
 ```
 % time ./pgdedupe.py -v -s 0.10 --dbname oshadedupe -t training.json --cores 30
