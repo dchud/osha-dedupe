@@ -111,6 +111,10 @@ Edit to add "user='ubuntu', password='ubuntu'" to db connect at line 83.
 
 ### Get it started; time it, too
 
+```
+% time ./pgdedupe.py -v -s 0.10 --dbname oshadedupe -t training.json --cores 30
+```
+
 Notes: 
 
  * ```-v```: verbose debugging output
@@ -119,13 +123,10 @@ Notes:
  * ```-t training.json```: create/use/save this file for training data
  * ```--cores 30``` on a big EC2 instance type, change appropriately
 
-```
-% time ./pgdedupe.py -v -s 0.10 --dbname oshadedupe -t training.json --cores 30
-```
-
-Provide some active learning responses.
+After execution begins, provide some training responses.
 
 (wait :)
 
-Results will be in the ```entity_map``` table, where individual record
-identifiers are mapped to target ```canon_id``` canonical identifiers.
+When it finishes, results will be in the ```entity_map``` table,
+where individual record identifiers are mapped to target ```canon_id```
+canonical identifiers.
